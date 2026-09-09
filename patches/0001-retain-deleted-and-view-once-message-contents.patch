@@ -1,0 +1,588 @@
+Retain the contents of deleted and view-once messages, dimmed
+
+Instead of destroying a message's contents when it is deleted for everyone or
+consumed as view-once, keep them on disk and render them dimmed, above a notice
+saying what happened.
+
+A new `retainedAfterErase` message attribute is set alongside `isErased` for the
+erase reasons we protect (delete-for-everyone and the view-once family), and the
+attachment files are left on disk for those reasons. It rides along in the
+`messages.json` blob, so no schema migration is needed.
+
+Everything outside the renderer keeps upstream semantics: `isErased` is still
+set, so full-text search, the media gallery and the tap-to-view deletion service
+behave as before, and the backup exporter still writes a bare
+`remoteDeletedMessage`. Retained contents are therefore local-only and do not
+survive a backup/restore round-trip.
+
+Messages that were erased before this build have no `retainedAfterErase` flag and
+keep the upstream tombstone rendering.
+
+Note: this deliberately ignores a request from the sender, who is told their
+delete succeeded and has no way to know this build kept the message.
+---
+diff --git a/stylesheets/_modules.scss b/stylesheets/_modules.scss
+index d8aef44..32a279c 100644
+--- a/stylesheets/_modules.scss
++++ b/stylesheets/_modules.scss
+@@ -1139,6 +1139,31 @@ $message-padding-horizontal: 12px;
+   color: light-dark(variables.$color-gray-60, variables.$color-gray-25);
+ }
+ 
++// A message that was deleted for everyone, or consumed as view-once, whose contents
++// we kept locally instead of erasing. Dimmed so it reads as "this was meant to be
++// gone" without hiding what it said.
++.module-message__container--retained-after-erase {
++  opacity: 0.65;
++  filter: saturate(0.4);
++
++  &:hover,
++  &:focus-within {
++    opacity: 1;
++    filter: none;
++  }
++}
++
++.module-message__retained-notice {
++  @include mixins.font-caption;
++
++  align-items: center;
++  display: flex;
++  flex-direction: row;
++  font-style: italic;
++  margin-bottom: 2px;
++  color: light-dark(variables.$color-gray-60, variables.$color-gray-25);
++}
++
+ .module-message__metadata {
+   @include mixins.font-caption;
+ 
+diff --git a/ts/components/conversation/Message.dom.tsx b/ts/components/conversation/Message.dom.tsx
+index 2100008..adfe3dc 100644
+--- a/ts/components/conversation/Message.dom.tsx
++++ b/ts/components/conversation/Message.dom.tsx
+@@ -305,6 +305,9 @@ export type PropsData = {
+   reactions?: ReactionViewerProps['reactions'];
+ 
+   deletedForEveryone?: boolean;
++  // True when the message was erased but we kept its contents on disk; the body and
++  // attachments render as normal, dimmed, with a notice explaining what happened.
++  retainedAfterErase?: boolean;
+   deletedForEveryoneByAdmin?: {
+     conversationId: string;
+     title: string;
+@@ -813,6 +816,7 @@ export class Message extends PureComponent<Props, State> {
+       isTapToViewError,
+       isTapToViewExpired,
+       readStatus,
++      retainedAfterErase,
+       shouldHideMetadata,
+       status,
+       text,
+@@ -856,7 +860,11 @@ export class Message extends PureComponent<Props, State> {
+       return MetadataPlacement.RenderedElsewhere;
+     }
+ 
+-    if (!text && !deletedForEveryone && !attachmentDroppedDueToSize) {
++    if (
++      !text &&
++      (!deletedForEveryone || retainedAfterErase) &&
++      !attachmentDroppedDueToSize
++    ) {
+       const firstAttachment = attachments && attachments[0];
+       const isAttachmentNotAvailable =
+         firstAttachment?.isPermanentlyUndownloadable;
+@@ -2338,69 +2346,76 @@ export class Message extends PureComponent<Props, State> {
+     );
+   }
+ 
+-  #getMessageStatusContents(): ReactNode {
++  #getDeletedForEveryoneText(): JSX.Element | string {
+     const {
+       author,
+       conversationId,
+-      deletedForEveryone,
+       deletedForEveryoneByAdmin,
+       direction,
+       i18n,
+       showContactModal,
+-      status,
+     } = this.props;
+ 
+-    if (deletedForEveryone) {
+-      let text: JSX.Element | string;
+-      if (deletedForEveryoneByAdmin != null) {
+-        if (deletedForEveryoneByAdmin.isMe) {
+-          text = i18n('icu:message--deletedForEveryone--outgoing');
+-        } else {
+-          text = (
+-            <I18n
+-              id="icu:message--deletedByAdmin"
+-              i18n={i18n}
+-              components={{
+-                admin: (
+-                  <strong>
+-                    <ContactName
+-                      title={deletedForEveryoneByAdmin.title}
+-                      contactNameColor={
+-                        deletedForEveryoneByAdmin.contactNameColor
+-                      }
+-                      onClick={() => {
+-                        showContactModal({
+-                          conversationId,
+-                          contactId: deletedForEveryoneByAdmin.conversationId,
+-                        });
+-                      }}
+-                    />
+-                  </strong>
+-                ),
+-              }}
+-            />
+-          );
+-        }
+-      } else if (direction === 'outgoing') {
++    let text: JSX.Element | string;
++    if (deletedForEveryoneByAdmin != null) {
++      if (deletedForEveryoneByAdmin.isMe) {
+         text = i18n('icu:message--deletedForEveryone--outgoing');
+       } else {
+         text = (
+           <I18n
+-            id="icu:message--deletedForEveryone--incoming"
++            id="icu:message--deletedByAdmin"
+             i18n={i18n}
+             components={{
+-              name: <ContactName title={author.title} />,
++              admin: (
++                <strong>
++                  <ContactName
++                    title={deletedForEveryoneByAdmin.title}
++                    contactNameColor={
++                      deletedForEveryoneByAdmin.contactNameColor
++                    }
++                    onClick={() => {
++                      showContactModal({
++                        conversationId,
++                        contactId: deletedForEveryoneByAdmin.conversationId,
++                      });
++                    }}
++                  />
++                </strong>
++              ),
+             }}
+           />
+         );
+       }
++    } else if (direction === 'outgoing') {
++      text = i18n('icu:message--deletedForEveryone--outgoing');
++    } else {
++      text = (
++        <I18n
++          id="icu:message--deletedForEveryone--incoming"
++          i18n={i18n}
++          components={{
++            name: <ContactName title={author.title} />,
++          }}
++        />
++      );
++    }
++    return text;
++  }
++
++  #getMessageStatusContents(): ReactNode {
++    const { deletedForEveryone, direction, i18n, retainedAfterErase, status } =
++      this.props;
++
++    // When the contents were retained they are rendered as usual and the notice
++    // moves to #renderRetainedNotice(), above the body.
++    if (deletedForEveryone && !retainedAfterErase) {
+       return (
+         <span dir="auto">
+           <span dir="auto">
+             <AxoSymbol.InlineGlyph symbol="x-circle" label={null} />
+           </span>
+           &nbsp;
+-          {text}
++          {this.#getDeletedForEveryoneText()}
+         </span>
+       );
+     }
+@@ -2411,6 +2426,28 @@ export class Message extends PureComponent<Props, State> {
+     return null;
+   }
+ 
++  // Shown above the retained body of a message that was deleted for everyone or
++  // consumed as view-once. The only erase reasons whose contents we retain are
++  // delete-for-everyone and the view-once family, so deletedForEveryone tells the
++  // two apart.
++  #renderRetainedNotice(): JSX.Element | null {
++    const { deletedForEveryone, i18n, retainedAfterErase } = this.props;
++
++    if (!retainedAfterErase) {
++      return null;
++    }
++
++    return (
++      <div className="module-message__retained-notice" dir="auto">
++        <AxoSymbol.InlineGlyph symbol="x-circle" label={null} />
++        &nbsp;
++        {deletedForEveryone
++          ? this.#getDeletedForEveryoneText()
++          : i18n('icu:Message--tap-to-view--viewed')}
++      </div>
++    );
++  }
++
+   #renderText(): ReactNode {
+     const {
+       text,
+@@ -2424,6 +2461,7 @@ export class Message extends PureComponent<Props, State> {
+       kickOffAttachmentDownload,
+       messageExpanded,
+       payment,
++      retainedAfterErase,
+       showConversation,
+       showSpoiler,
+       status,
+@@ -2433,7 +2471,12 @@ export class Message extends PureComponent<Props, State> {
+     const { metadataWidth } = this.state;
+ 
+     const messageStatusContents = this.#getMessageStatusContents();
+-    if (messageStatusContents == null && text == null) {
++    const retainedNotice = this.#renderRetainedNotice();
++    if (
++      messageStatusContents == null &&
++      retainedNotice == null &&
++      text == null
++    ) {
+       return null;
+     }
+ 
+@@ -2451,7 +2494,7 @@ export class Message extends PureComponent<Props, State> {
+           status === 'error' && direction === 'incoming' && !deletedForEveryone
+             ? 'module-message__text--error'
+             : null,
+-          deletedForEveryone
++          deletedForEveryone || retainedAfterErase
+             ? 'module-message__text--delete-for-everyone'
+             : null
+         )}
+@@ -2473,6 +2516,7 @@ export class Message extends PureComponent<Props, State> {
+           event.stopPropagation();
+         }}
+       >
++        {retainedNotice}
+         {messageStatusContents != null && messageStatusContents}
+         {messageStatusContents == null && text != null && (
+           <MessageBodyReadMore
+@@ -3047,9 +3091,12 @@ export class Message extends PureComponent<Props, State> {
+   }
+ 
+   #renderContents(): ReactNode {
+-    const { deletedForEveryone, giftBadge, isTapToView } = this.props;
++    const { deletedForEveryone, giftBadge, isTapToView, retainedAfterErase } =
++      this.props;
+ 
+-    if (deletedForEveryone) {
++    // Messages deleted before this build has retained anything have no contents to
++    // show, so they keep the upstream tombstone rendering.
++    if (deletedForEveryone && !retainedAfterErase) {
+       return (
+         <>
+           {this.#renderText()}
+@@ -3309,6 +3356,7 @@ export class Message extends PureComponent<Props, State> {
+       isTapToView,
+       quote,
+       renderMessageContextMenu,
++      retainedAfterErase,
+       text,
+       textDirection,
+     } = this.props;
+@@ -3352,9 +3400,12 @@ export class Message extends PureComponent<Props, State> {
+         : null,
+       isClickable ? 'module-message__container--is-clickable' : null,
+       this.#hasReactions() ? 'module-message__container--with-reactions' : null,
+-      deletedForEveryone
++      deletedForEveryone && !retainedAfterErase
+         ? 'module-message__container--deleted-for-everyone'
+         : null,
++      retainedAfterErase
++        ? 'module-message__container--retained-after-erase'
++        : null,
+       this.props.isSignalConversation
+         ? tw(
+             // oxlint-disable-next-line better-tailwindcss/no-restricted-classes
+@@ -3367,7 +3418,7 @@ export class Message extends PureComponent<Props, State> {
+     };
+     if (
+       !isStickerLike &&
+-      !deletedForEveryone &&
++      (!deletedForEveryone || retainedAfterErase) &&
+       !(attachmentDroppedDueToSize && !text) &&
+       direction === 'outgoing'
+     ) {
+diff --git a/ts/model-types.d.ts b/ts/model-types.d.ts
+index caf8efa..7ef7c67 100644
+--- a/ts/model-types.d.ts
++++ b/ts/model-types.d.ts
+@@ -205,6 +205,10 @@ export type MessageAttributesType = {
+   group_update?: GroupV1Update;
+   mentionsMe?: boolean | 0 | 1;
+   isErased?: boolean;
++  // Set alongside isErased when the erase reason is one whose contents we retain
++  // locally (see RETAIN_CONTENTS_ERASE_REASONS). The message body/attachments are
++  // still present and should be rendered, dimmed, instead of a tombstone.
++  retainedAfterErase?: boolean;
+   isTapToViewInvalid?: boolean;
+   isViewOnce?: boolean;
+   editHistory?: ReadonlyArray<EditHistoryType>;
+diff --git a/ts/state/selectors/message.preload.ts b/ts/state/selectors/message.preload.ts
+index 1227503..1f155b1 100644
+--- a/ts/state/selectors/message.preload.ts
++++ b/ts/state/selectors/message.preload.ts
+@@ -952,7 +952,12 @@ const getPropsForMessage = (
+   const isGroupTerminated = isGroup && conversation.terminated;
+   const { sticker } = message;
+ 
+-  const isMessageTapToView = isTapToView(message);
++  // Once we have retained the contents of an erased message, it renders as an
++  // ordinary (dimmed) message rather than a tap-to-view placeholder. This is scoped
++  // to the props only -- isTapToView() itself still reports the truth to the backup
++  // exporter, the deletion service and the SQL layer.
++  const retainedAfterErase = Boolean(message.retainedAfterErase);
++  const isMessageTapToView = isTapToView(message) && !retainedAfterErase;
+   const activeCallConversationId = activeCall?.conversationId;
+ 
+   const isTargeted = message.id === targetedMessageId;
+@@ -1035,6 +1040,7 @@ const getPropsForMessage = (
+     conversationType: isGroup ? 'group' : 'direct',
+     customColor,
+     deletedForEveryone: message.deletedForEveryone || false,
++    retainedAfterErase,
+     deletedForEveryoneByAdmin: getDeletedForEveryoneByAdmin(message, {
+       conversationSelector,
+       contactNameColors,
+@@ -2451,9 +2457,15 @@ export function canReact(
+ }
+ 
+ function canCopy(
+-  message: Pick<MessageWithUIFieldsType, 'body' | 'deletedForEveryone'>
++  message: Pick<
++    MessageWithUIFieldsType,
++    'body' | 'deletedForEveryone' | 'retainedAfterErase'
++  >
+ ): boolean {
+-  return !message.deletedForEveryone && Boolean(message.body);
++  return (
++    (!message.deletedForEveryone || Boolean(message.retainedAfterErase)) &&
++    Boolean(message.body)
++  );
+ }
+ 
+ type CanDeleteForEveryoneConversation = Pick<
+diff --git a/ts/test-electron/util/cleanup_message_test.preload.ts b/ts/test-electron/util/cleanup_message_test.preload.ts
+index f52ca81..5e79f7b 100644
+--- a/ts/test-electron/util/cleanup_message_test.preload.ts
++++ b/ts/test-electron/util/cleanup_message_test.preload.ts
+@@ -88,7 +88,7 @@ describe('cleanupMessage', () => {
+     });
+   });
+ 
+-  it('eraseMessageContents preserves reactions for view-once messages', async () => {
++  it('eraseMessageContents retains contents and reactions for view-once messages', async () => {
+     const now = Date.now();
+     const attributes: MessageAttributesType = {
+       id: v7(),
+@@ -135,7 +135,10 @@ describe('cleanupMessage', () => {
+           timestamp: now + 1,
+         },
+       ],
++      // Downstream: view-once is a retained erase reason, so the body survives.
++      body: 'body',
+       isErased: true,
++      retainedAfterErase: true,
+     });
+   });
+ 
+@@ -185,6 +188,53 @@ describe('cleanupMessage', () => {
+     assert.sameDeepMembers(listAttachmentFiles(), ['a-random-attachment']);
+   });
+ 
++  // Downstream: delete-for-everyone is a retained erase reason, so both the
++  // attachment attribute and the file it points at have to survive.
++  it('eraseMessageContents keeps attachments when deleted for everyone', async () => {
++    await writeAttachmentFile('path-to-attachment');
++
++    const now = Date.now();
++    const attachments = [
++      {
++        size: 128,
++        contentType: IMAGE_JPEG,
++        path: 'path-to-attachment',
++      },
++    ];
++    const attributes: MessageAttributesType = {
++      id: v7(),
++      type: 'incoming',
++      sent_at: now,
++      received_at: now,
++      conversationId: 'convoId',
++      timestamp: now,
++      schemaVersion: 12,
++      body: 'body',
++      attachments,
++      sendStateByConversationId: { aci: { status: SendStatus.Delivered } },
++    };
++    await window.MessageCache.saveMessage(attributes, { forceSave: true });
++
++    const message = new MessageModel(attributes);
++    await eraseMessageContents(message, 'delete-for-everyone');
++
++    assert.deepEqual(message.attributes, {
++      id: attributes.id,
++      type: attributes.type,
++      sent_at: attributes.sent_at,
++      received_at: attributes.received_at,
++      conversationId: 'convoId',
++      timestamp: attributes.timestamp,
++      schemaVersion: 12,
++      sendStateByConversationId: { aci: { status: SendStatus.Delivered } },
++      body: 'body',
++      attachments,
++      isErased: true,
++      retainedAfterErase: true,
++    });
++    assert.sameDeepMembers(listAttachmentFiles(), ['path-to-attachment']);
++  });
++
+   describe('cleanupStoryReplies', () => {
+     it('cleanupFilesAndReferencesToMessage deletes story replies in group conversations', async () => {
+       const now = Date.now();
+diff --git a/ts/types/Message.std.ts b/ts/types/Message.std.ts
+index ee68fd2..a67ac84 100644
+--- a/ts/types/Message.std.ts
++++ b/ts/types/Message.std.ts
+@@ -23,6 +23,23 @@ const VIEW_ONCE_REASONS = new Set<EraseMessageReasonType>([
+   'view-once-viewed',
+ ]);
+ 
++// Erase reasons where we keep the message contents on disk instead of destroying
++// them, so the timeline can show what was there, dimmed. Everything else
++// ('unsupported-message') still erases: there is nothing worth showing.
++const RETAIN_CONTENTS_ERASE_REASONS = new Set<EraseMessageReasonType>([
++  ...VIEW_ONCE_REASONS,
++  'delete-for-everyone',
++]);
++
++export function shouldRetainContentsAfterErase(
++  reason: EraseMessageReasonType
++): boolean {
++  return RETAIN_CONTENTS_ERASE_REASONS.has(reason);
++}
++
++const retainable = (reason: EraseMessageReasonType): 'preserve' | 'erase' =>
++  shouldRetainContentsAfterErase(reason) ? 'preserve' : 'erase';
++
+ const messageAttributesEraseBehavior: Record<
+   keyof MessageAttributesType,
+   | 'preserve'
+@@ -49,6 +66,7 @@ const messageAttributesEraseBehavior: Record<
+   expirationStartTimestamp: 'preserve',
+   expireTimer: 'preserve',
+   isErased: 'preserve',
++  retainedAfterErase: 'preserve',
+   isTapToViewInvalid: 'preserve',
+   isViewOnce: 'preserve',
+   readAt: 'preserve',
+@@ -68,18 +86,18 @@ const messageAttributesEraseBehavior: Record<
+   synced: 'preserve',
+   unidentifiedDeliveries: 'preserve',
+ 
+-  attachments: 'erase',
+-  body: 'erase',
+-  bodyAttachment: 'erase',
+-  bodyRanges: 'erase',
++  attachments: retainable,
++  body: retainable,
++  bodyAttachment: retainable,
++  bodyRanges: retainable,
+   callId: 'erase',
+   changedId: 'erase',
+-  contact: 'erase',
++  contact: retainable,
+   conversationMerge: 'erase',
+   dataMessage: 'erase',
+   decrypted_at: 'erase',
+   droppedGV2MemberIds: 'erase',
+-  editHistory: 'erase',
++  editHistory: retainable,
+   expirationTimerUpdate: 'erase',
+   flags: 'erase',
+   giftBadge: 'erase',
+@@ -101,12 +119,12 @@ const messageAttributesEraseBehavior: Record<
+   pinMessage: 'erase',
+   poll: 'erase',
+   pollTerminateNotification: 'erase',
+-  preview: 'erase',
++  preview: retainable,
+   profileChange: 'erase',
+-  quote: 'erase',
++  quote: retainable,
+   sendHQImages: 'erase',
+   sms: 'erase',
+-  sticker: 'erase',
++  sticker: retainable,
+   storyDistributionListId: 'erase',
+   storyReaction: 'erase',
+   storyRecipientsVersion: 'erase',
+diff --git a/ts/util/cleanup.preload.ts b/ts/util/cleanup.preload.ts
+index a7e2414..a5f84f2 100644
+--- a/ts/util/cleanup.preload.ts
++++ b/ts/util/cleanup.preload.ts
+@@ -44,6 +44,7 @@ import { tapToViewMessagesDeletionService } from '../services/tapToViewMessagesD
+ import { throttledUpdateBackupMediaDownloadProgress } from './updateBackupMediaDownloadProgress.preload.ts';
+ import {
+   getMessageAttrsToPreserveAfterErase,
++  shouldRetainContentsAfterErase,
+   type EraseMessageReasonType,
+ } from '../types/Message.std.ts';
+ import type { AttachmentType } from '../types/Attachment.std.ts';
+@@ -77,10 +78,12 @@ export async function eraseMessageContents(
+     message.attributes,
+     ...getMessageAttrsToPreserveAfterErase(reason)
+   );
++  const retainContents = shouldRetainContentsAfterErase(reason);
+ 
+   message.resetAllAttributes({
+     ...preservedAttributes,
+     isErased: true,
++    ...(retainContents ? { retainedAfterErase: true } : {}),
+     ...additionalProperties,
+   });
+ 
+@@ -91,14 +94,17 @@ export async function eraseMessageContents(
+   await window.MessageCache.saveMessage(message.attributes);
+ 
+   // Cleanup files only after saving message so any files only referenced by that message
+-  // are properly deleted
+-  try {
+-    await cleanupFilesAndReferencesToMessage(originalAttributes);
+-  } catch (error) {
+-    log.error(
+-      `Error erasing data for message ${getMessageIdForLogging(message.attributes)}:`,
+-      Errors.toLogFormat(error)
+-    );
++  // are properly deleted. When we retain the contents, the preserved attachments still
++  // point at these files, so leave them in place.
++  if (!retainContents) {
++    try {
++      await cleanupFilesAndReferencesToMessage(originalAttributes);
++    } catch (error) {
++      log.error(
++        `Error erasing data for message ${getMessageIdForLogging(message.attributes)}:`,
++        Errors.toLogFormat(error)
++      );
++    }
+   }
+ 
+   await DataWriter.deleteSentProtoByMessageId(message.id);

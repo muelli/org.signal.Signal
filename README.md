@@ -6,6 +6,17 @@ Signal-Desktop is a Private Messenger that links with your installed Android/iOS
 
 Note that this is an **unofficial** redistribution.
 
+## Downstream changes
+
+This build carries local patches (see `patches/` and `UPDATING.md`) and does not
+behave identically to upstream Signal Desktop:
+
+- **Deleted and view-once messages are kept, not erased.** When someone deletes
+  a message for everyone, or when a view-once photo or video is consumed, the
+  contents stay on disk and are shown dimmed with a note saying what happened,
+  instead of being destroyed. The sender is still told their delete succeeded
+  and has no way to know this build kept the message.
+
 ## Installing
 
 ```bash

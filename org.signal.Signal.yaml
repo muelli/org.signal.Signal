@@ -205,6 +205,9 @@ modules:
           version-scheme: semantic
           is-main-source: true
           source-id: signal-desktop
+      # Keeps contents of messages deleted for everyone or consumed as view-once, dimmed. Re-check with "git apply --check" on each new pin.
+      - type: patch
+        path: patches/0001-retain-deleted-and-view-once-message-contents.patch
       # In a checkout of the pinned commit, with a flatpak-node-generator that reads pnpm 11's two-document lockfile (flatpak/flatpak-builder-tools#559):
       # flatpak-node-generator pnpm pnpm-lock.yaml -o generated-sources.json --node-sdk-extension org.freedesktop.Sdk.Extension.node24//26.08 --pnpm-store-version v11
       - generated-sources.json
