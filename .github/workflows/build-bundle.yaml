@@ -18,14 +18,18 @@ jobs:
 
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5
 
+      # Root makes tar restore archive ownership, which fails inside the build sandbox.
+      - name: Create an unprivileged build user
+        run: useradd -m builder && chown -R builder .
+
       - name: Add Flathub
-        run: flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+        run: su builder -c 'flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo'
 
       - name: Build
-        run: timeout -k 30s 330m flatpak-builder --user --disable-rofiles-fuse --install-deps-from=flathub --force-clean --repo=repo build org.signal.Signal.yaml
+        run: su builder -c 'timeout -k 30s 330m flatpak-builder --user --disable-rofiles-fuse --install-deps-from=flathub --force-clean --repo=repo build org.signal.Signal.yaml'
 
       - name: Export the bundle
-        run: flatpak build-bundle repo org.signal.Signal.flatpak org.signal.Signal
+        run: su builder -c 'flatpak build-bundle repo org.signal.Signal.flatpak org.signal.Signal'
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
