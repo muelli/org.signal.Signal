@@ -18,6 +18,11 @@ jobs:
 
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5
 
+      # appstreamcli compose fails here with file-read-error; a local bundle has no use for the catalog data.
+      - name: Skip AppStream compose
+        run: |
+          echo 'appstream-compose: false' >> org.signal.Signal.yaml
+
       # Root makes tar restore archive ownership, which fails inside the build sandbox.
       - name: Create an unprivileged build user
         run: useradd -m builder && chown -R builder .
